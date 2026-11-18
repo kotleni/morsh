@@ -78,12 +78,16 @@ fn reader(tb: &Path) -> Result<Box<dyn std::io::Read>, String> {
 }
 
 fn unpack(tb: &Path, dest: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dest).map_err(|e| e.to_string())?;
     let mut ar = tar::Archive::new(reader(tb)?);
     for e in ar.entries().map_err(|e| e.to_string())? {
         let mut e = e.map_err(|e| e.to_string())?;
+        let rel = e.path().map_err(|e| e.to_string())?.into_owned();
+        if rel == Path::new(".") {
+            continue;
+        }
         if e.header().entry_type().is_dir() {
-            std::fs::create_dir_all(dest.join(e.path().map_err(|e| e.to_string())?))
-                .map_err(|e| e.to_string())?;
+            std::fs::create_dir_all(dest.join(&rel)).map_err(|e| e.to_string())?;
         } else {
             e.unpack_in(dest).map_err(|e| e.to_string())?;
         }
@@ -168,13 +172,16 @@ pub fn ensure(
     let root = dir.join("rootfs");
     let ok = dir.join(".ok");
     if !refresh && ok.exists() && root.join("bin").exists() {
+        eprintln!("using cached rootfs {}", root.display());
         return Ok(root);
     }
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let _ = std::fs::remove_file(&ok);
     let tb = dir.join(&spec.file);
+    eprintln!("downloading {}", spec.tarball_url);
     fetch(&spec.tarball_url, &tb)?;
     let txt = fetch_text(&spec.sha_url, &dir)?;
+    eprintln!("verifying {}", tb.display());
     verify(&tb, &txt)?;
     let tmp = dir.join("rootfs.tmp");
     if tmp.exists() {
@@ -183,6 +190,7 @@ pub fn ensure(
     if root.exists() {
         remove_all(&root)?;
     }
+    eprintln!("unpacking {} to {}", tb.display(), root.display());
     extract(&tb, &tmp)?;
     let src = match &spec.subdir {
         Some(s) => tmp.join(s),
