@@ -7,6 +7,7 @@ struct Cmdline {
     distro: Option<String>,
     distro_version: Option<String>,
     refresh: bool,
+    display: bool,
     rootfs_cache: Option<String>,
     new_root: Option<String>,
     guest_argv: Vec<String>,
@@ -19,6 +20,7 @@ impl Default for Cmdline {
             distro: None,
             distro_version: None,
             refresh: false,
+            display: false,
             rootfs_cache: None,
             new_root: None,
             guest_argv: Vec::new(),
@@ -34,6 +36,7 @@ fn print_help(prog: &str) {
     eprintln!("              --distro=NAME[:VER]     Use cached distro rootfs (alpine, arch) instead of NEWROOT");
     eprintln!("              --distro-release=VER    Distro version (alpine {}, arch {})", distro::ALPINE_VERSION, distro::ARCH_VERSION);
     eprintln!("              --refresh               Re-download the distro rootfs");
+    eprintln!("              --display               Share host display (X11/Wayland) with the container");
     eprintln!("              --rootfs-cache=DIR      Rootfs cache directory");
     eprintln!();
     eprintln!("NEWROOT:      the root directory of the container");
@@ -76,6 +79,11 @@ fn parse_cmdline(args: &[String], cmdline: &mut Cmdline) -> bool {
         }
         if name == "--refresh" {
             cmdline.refresh = true;
+            i += 1;
+            continue;
+        }
+        if name == "--display" {
+            cmdline.display = true;
             i += 1;
             continue;
         }
@@ -134,6 +142,70 @@ fn parse_cmdline(args: &[String], cmdline: &mut Cmdline) -> bool {
     false
 }
 
+fn collect_display(env: &mut Vec<(String, String)>) -> Result<Vec<run::ExtraBind>, String> {
+    let mut binds = Vec::new();
+    let mut found = false;
+    if let Ok(d) = std::env::var("DISPLAY") {
+        if !d.is_empty() {
+            found = true;
+            env.push(("DISPLAY".to_string(), d));
+            if std::path::Path::new("/tmp/.X11-unix").is_dir() {
+                binds.push(run::ExtraBind {
+                    src: "/tmp/.X11-unix".to_string(),
+                    dst: "/tmp/.X11-unix".to_string(),
+                    dir: true,
+                });
+            } else {
+                eprintln!("warning: /tmp/.X11-unix not found, X11 may fall back to TCP");
+            }
+            let cookie = std::env::var("XAUTHORITY")
+                .ok()
+                .filter(|p| std::path::Path::new(p).is_file())
+                .or_else(|| {
+                    std::env::var("HOME")
+                        .ok()
+                        .map(|h| format!("{h}/.Xauthority"))
+                        .filter(|p| std::path::Path::new(p).is_file())
+                });
+            if let Some(c) = cookie {
+                env.push(("XAUTHORITY".to_string(), "/tmp/.dshell-xauth".to_string()));
+                binds.push(run::ExtraBind {
+                    src: c,
+                    dst: "/tmp/.dshell-xauth".to_string(),
+                    dir: false,
+                });
+            }
+        }
+    }
+    if let Ok(w) = std::env::var("WAYLAND_DISPLAY") {
+        if !w.is_empty() {
+            let rdir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| {
+                format!("/run/user/{}", unsafe { libc::getuid() })
+            });
+            let (host, disp) = if w.starts_with('/') {
+                (w.clone(), w.clone())
+            } else {
+                (format!("{rdir}/{w}"), w.clone())
+            };
+            if !std::path::Path::new(&host).exists() {
+                return Err(format!("wayland socket {host} not found"));
+            }
+            found = true;
+            env.push(("WAYLAND_DISPLAY".to_string(), disp));
+            env.push(("XDG_RUNTIME_DIR".to_string(), rdir));
+            binds.push(run::ExtraBind {
+                src: host.clone(),
+                dst: host,
+                dir: false,
+            });
+        }
+    }
+    if !found {
+        return Err("no display found (set DISPLAY or WAYLAND_DISPLAY)".to_string());
+    }
+    Ok(binds)
+}
+
 fn run() -> i32 {
     let args: Vec<String> = std::env::args().collect();
     let prog = args.first().cloned().unwrap_or_else(|| "dshell".to_string());
@@ -183,7 +255,7 @@ fn run() -> i32 {
     }
 
     let root = cmdline.new_root.clone().unwrap_or_default();
-    let (env, workdir) = if is_distro {
+    let (mut env, workdir) = if is_distro {
         let term = std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".to_string());
         (
             vec![
@@ -199,7 +271,18 @@ fn run() -> i32 {
     } else {
         (vec![("TEST".to_string(), "works".to_string())], "/")
     };
-    run::enter(std::path::Path::new(&root), &cmdline.guest_argv, &env, workdir)
+    let extra = if cmdline.display {
+        match collect_display(&mut env) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("{e}");
+                return -1;
+            }
+        }
+    } else {
+        Vec::new()
+    };
+    run::enter(std::path::Path::new(&root), &cmdline.guest_argv, &env, workdir, &extra)
 }
 
 fn main() {

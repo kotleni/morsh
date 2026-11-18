@@ -43,6 +43,12 @@ fn bind(src: &str, tgt: &str) -> Result<(), String> {
     do_mount(Some(src), tgt, None, (libc::MS_BIND | libc::MS_REC) as _, None)
 }
 
+pub struct ExtraBind {
+    pub src: String,
+    pub dst: String,
+    pub dir: bool,
+}
+
 fn tmpfs(tgt: &str) -> Result<(), String> {
     do_mount(
         Some("tmpfs"),
@@ -82,6 +88,7 @@ fn grandchild(
     argv: &[CString],
     env: &[(String, String)],
     workdir: &str,
+    extra: &[ExtraBind],
 ) -> ! {
     let fail = |msg: String| -> ! {
         eprintln!("{msg}");
@@ -171,6 +178,27 @@ fn grandchild(
     if Path::new("/var/tmp").exists() {
         step(tmpfs("/var/tmp"));
     }
+    for b in extra {
+        let host = format!("/oldroot{}", b.src);
+        if b.dir {
+            let _ = std::fs::create_dir_all(&b.dst);
+            step(bind(&host, &b.dst));
+        } else {
+            if let Some(p) = Path::new(&b.dst).parent() {
+                let _ = std::fs::create_dir_all(p);
+            }
+            if std::fs::File::create(&b.dst).is_err() {
+                fail(format!("create {}", b.dst));
+            }
+            step(do_mount(
+                Some(&host),
+                &b.dst,
+                None,
+                libc::MS_BIND as _,
+                None,
+            ));
+        }
+    }
     if unsafe { libc::umount2(CString::new("/oldroot").unwrap().as_ptr(), libc::MNT_DETACH) } < 0 {
         fail(format!("umount oldroot: {}", std::io::Error::last_os_error()));
     }
@@ -232,7 +260,13 @@ fn grandchild(
     }
 }
 
-pub fn enter(root: &Path, argv: &[String], env: &[(String, String)], workdir: &str) -> i32 {
+pub fn enter(
+    root: &Path,
+    argv: &[String],
+    env: &[(String, String)],
+    workdir: &str,
+    extra: &[ExtraBind],
+) -> i32 {
     if argv.is_empty() {
         eprintln!("Missing COMMAND argument");
         return -1;
@@ -298,7 +332,7 @@ pub fn enter(root: &Path, argv: &[String], env: &[(String, String)], workdir: &s
             unsafe { libc::_exit(1) };
         }
         if pid2 == 0 {
-            grandchild(&root, &c_argv, &c_env, workdir);
+            grandchild(&root, &c_argv, &c_env, workdir, extra);
         }
         unsafe { libc::_exit(wait_pid(pid2)) };
     }
