@@ -1,12 +1,17 @@
+name: CI
+
 on:
   push:
   pull_request:
+
 jobs:
   build:
     runs-on: ubuntu-latest
-    container:
-      image: rust:1-bookworm
     steps:
-      - uses: actions/checkout@v4
+      - uses: https://github.com/actions/checkout@v7
+      - name: Install Rust toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
       - run: cargo build --locked
       - run: cargo test --locked
