@@ -1,0 +1,64 @@
+pub const ALPINE_VERSION: &str = "3.21.3";
+pub const ARCH_VERSION: &str = "2026.11.01";
+
+pub struct Spec {
+    pub tarball_url: String,
+    pub sha_url: String,
+    pub file: String,
+    pub shell: &'static str,
+    pub subdir: Option<String>,
+}
+
+pub fn host_arch() -> Option<&'static str> {
+    match std::env::consts::ARCH {
+        "x86_64" => Some("x86_64"),
+        "aarch64" => Some("aarch64"),
+        _ => None,
+    }
+}
+
+pub fn alpine(version: &str) -> Option<Spec> {
+    let arch = host_arch()?;
+    let mut parts = version.split('.');
+    let branch = format!("v{}.{}", parts.next()?, parts.next()?);
+    let file = format!("alpine-minirootfs-{version}-{arch}.tar.gz");
+    let base = format!("https://dl-cdn.alpinelinux.org/alpine/{branch}/releases/{arch}");
+    Some(Spec {
+        tarball_url: format!("{base}/{file}"),
+        sha_url: format!("{base}/{file}.sha256"),
+        file,
+        shell: "/bin/ash",
+        subdir: None,
+    })
+}
+
+pub fn arch(version: &str) -> Option<Spec> {
+    if version.is_empty() || host_arch()? != "x86_64" {
+        return None;
+    }
+    let file = format!("archlinux-bootstrap-{version}-x86_64.tar.zst");
+    let base = format!("https://geo.mirror.pkgbuild.com/iso/{version}");
+    Some(Spec {
+        tarball_url: format!("{base}/{file}"),
+        sha_url: format!("{base}/sha256sums.txt"),
+        file,
+        shell: "/bin/bash",
+        subdir: Some("root.x86_64".to_string()),
+    })
+}
+
+pub fn spec(name: &str, version: &str) -> Option<Spec> {
+    match name {
+        "alpine" => alpine(version),
+        "arch" => arch(version),
+        _ => None,
+    }
+}
+
+pub fn default_version(name: &str) -> Option<&'static str> {
+    match name {
+        "alpine" => Some(ALPINE_VERSION),
+        "arch" => Some(ARCH_VERSION),
+        _ => None,
+    }
+}
