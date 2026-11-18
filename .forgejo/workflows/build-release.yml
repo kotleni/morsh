@@ -5,11 +5,20 @@ on:
 jobs:
   release:
     runs-on: ubuntu-latest
+    env:
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --locked --release
+        with:
+          targets: aarch64-unknown-linux-gnu
+      - run: apt-get update && apt-get install -y gcc-aarch64-linux-gnu
+      - run: cargo build --locked --release --target x86_64-unknown-linux-gnu
+      - run: cargo build --locked --release --target aarch64-unknown-linux-gnu
+      - run: tar -czf dshell-linux-x86_64.tar.gz -C target/x86_64-unknown-linux-gnu/release dshell
+      - run: tar -czf dshell-linux-aarch64.tar.gz -C target/aarch64-unknown-linux-gnu/release dshell
       - uses: https://gitea.com/actions/gitea-release-action@v1
         with:
           files: |-
-            target/release/dshell
+            dshell-linux-x86_64.tar.gz
+            dshell-linux-aarch64.tar.gz
