@@ -104,7 +104,7 @@ fn parse_cmdline(args: &[String], cmdline: &mut Cmdline) -> bool {
                     Some((n, v)) => (n.to_string(), Some(v.to_string())),
                     None => (val.to_string(), None),
                 };
-                if n != "alpine" && n != "arch" {
+                if n != "alpine" && n != "arch" && n != "ubuntu" {
                     eprintln!("Unknown distro {n}");
                     return false;
                 }

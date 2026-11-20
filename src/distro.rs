@@ -1,5 +1,6 @@
 pub const ALPINE_VERSION: &str = "3.21.3";
 pub const ARCH_VERSION: &str = "2026.11.01";
+pub const UBUNTU_VERSION: &str = "26.04";
 
 pub struct Spec {
     pub tarball_url: String,
@@ -47,10 +48,30 @@ pub fn arch(version: &str) -> Option<Spec> {
     })
 }
 
+pub fn ubuntu(version: &str) -> Option<Spec> {
+    if version.is_empty() {
+        return None;
+    }
+    
+    let arch = host_arch()?;
+    let patched_arch = if arch == "aarch64" { "arm64" } else { arch };
+    
+    let file = format!("ubuntu-{version}-server-cloudimg-{patched_arch}-root.tar.xz");
+    let base = "https://cloud-images.ubuntu.com/releases/resolute/release/";
+    Some(Spec {
+        tarball_url: format!("{base}/{file}"),
+        sha_url: format!("{base}/SHA256SUMS"),
+        file,
+        shell: "/bin/bash",
+        subdir: None,
+    })
+}
+
 pub fn spec(name: &str, version: &str) -> Option<Spec> {
     match name {
         "alpine" => alpine(version),
         "arch" => arch(version),
+        "ubuntu" => ubuntu(version),
         _ => None,
     }
 }
@@ -59,6 +80,7 @@ pub fn default_version(name: &str) -> Option<&'static str> {
     match name {
         "alpine" => Some(ALPINE_VERSION),
         "arch" => Some(ARCH_VERSION),
+        "ubuntu" => Some(UBUNTU_VERSION),
         _ => None,
     }
 }

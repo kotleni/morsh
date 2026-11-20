@@ -68,7 +68,9 @@ fn verify(tb: &Path, txt: &str) -> Result<(), String> {
 fn reader(tb: &Path) -> Result<Box<dyn std::io::Read>, String> {
     let f = std::fs::File::open(tb).map_err(|e| e.to_string())?;
     let name = tb.file_name().and_then(|s| s.to_str()).unwrap_or("");
-    if name.ends_with(".zst") {
+    if name.ends_with(".xz") {
+        Ok(Box::new(xz2::read::XzDecoder::new(f)))
+    } else if name.ends_with(".zst") {
         Ok(Box::new(
             ruzstd::decoding::StreamingDecoder::new(f).map_err(|e| e.to_string())?,
         ))
@@ -86,6 +88,9 @@ fn unpack(tb: &Path, dest: &Path) -> Result<(), String> {
         if rel == Path::new(".") {
             continue;
         }
+
+        // println!("=> {}", rel.display());
+        
         if e.header().entry_type().is_dir() {
             std::fs::create_dir_all(dest.join(&rel)).map_err(|e| e.to_string())?;
         } else {
