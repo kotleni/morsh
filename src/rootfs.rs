@@ -89,8 +89,6 @@ fn unpack(tb: &Path, dest: &Path) -> Result<(), String> {
             continue;
         }
 
-        // println!("=> {}", rel.display());
-        
         if e.header().entry_type().is_dir() {
             std::fs::create_dir_all(dest.join(&rel)).map_err(|e| e.to_string())?;
         } else {
@@ -203,10 +201,9 @@ pub fn ensure(
     };
     std::fs::rename(&src, &root).map_err(|e| e.to_string())?;
     let rc = root.join("etc").join("resolv.conf");
-    if !rc.exists() {
-        std::fs::write(&rc, "nameserver 8.8.8.8\nnameserver 1.1.1.1\n")
-            .map_err(|e| e.to_string())?;
-    }
+    let _ = std::fs::remove_file(&rc);
+    std::fs::write(&rc, "nameserver 8.8.8.8\nnameserver 1.1.1.1\n")
+        .map_err(|e| e.to_string())?;
     if distro == "arch" {
         let ml = root.join("etc").join("pacman.d").join("mirrorlist");
         std::fs::write(&ml, "Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch\n")
