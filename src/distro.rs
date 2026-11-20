@@ -54,7 +54,11 @@ pub fn ubuntu(version: &str) -> Option<Spec> {
     }
     
     let arch = host_arch()?;
-    let patched_arch = if arch == "aarch64" { "arm64" } else { arch };
+    let patched_arch = match arch {
+        "aarch64" => "arm64",
+        "x86_64" => "amd64",
+        _ => arch,
+    };
     
     let file = format!("ubuntu-{version}-server-cloudimg-{patched_arch}-root.tar.xz");
     let base = "https://cloud-images.ubuntu.com/releases/resolute/release/";
