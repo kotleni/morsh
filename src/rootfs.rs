@@ -153,6 +153,23 @@ fn extract(tb: &Path, dest: &Path) -> Result<(), String> {
     apply_modes(tb, dest)
 }
 
+fn run_patches(distro: &str, root: &Path) -> Result<(), String> {
+    for (name, body) in crate::distro::patches(distro) {
+        eprintln!("patch {name}");
+        let st = Command::new("sh")
+            .arg("-c")
+            .arg(body)
+            .arg(name)
+            .arg(root)
+            .status()
+            .map_err(|e| format!("patch {name}: {e}"))?;
+        if !st.success() {
+            return Err(format!("patch {name} failed: {st}"));
+        }
+    }
+    Ok(())
+}
+
 pub fn ensure(
     distro: &str,
     version: &str,
@@ -200,31 +217,7 @@ pub fn ensure(
         None => tmp,
     };
     std::fs::rename(&src, &root).map_err(|e| e.to_string())?;
-    let rc = root.join("etc").join("resolv.conf");
-    let _ = std::fs::remove_file(&rc);
-    std::fs::write(&rc, "nameserver 8.8.8.8\nnameserver 1.1.1.1\n")
-        .map_err(|e| e.to_string())?;
-    if distro == "arch" {
-        let ml = root.join("etc").join("pacman.d").join("mirrorlist");
-        std::fs::write(&ml, "Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch\n")
-            .map_err(|e| e.to_string())?;
-        let pc = root.join("etc").join("pacman.conf");
-        let txt = std::fs::read_to_string(&pc).map_err(|e| e.to_string())?;
-        let mut patched = String::new();
-        for line in txt.lines() {
-            let t = line.trim_start();
-            if t.starts_with("SigLevel") && !t.starts_with("LocalFileSigLevel") {
-                patched.push_str("SigLevel = Never\n");
-            } else {
-                patched.push_str(line);
-                patched.push('\n');
-            }
-        }
-        let patched = patched
-            .replace("#DisableSandboxFilesystem", "DisableSandboxFilesystem")
-            .replace("#DisableSandboxSyscalls", "DisableSandboxSyscalls");
-        std::fs::write(&pc, patched).map_err(|e| e.to_string())?;
-    }
+    run_patches(distro, &root)?;
     std::fs::write(&ok, "1").map_err(|e| e.to_string())?;
     Ok(root)
 }

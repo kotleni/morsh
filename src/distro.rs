@@ -84,3 +84,20 @@ pub fn default_version(name: &str) -> Option<&'static str> {
         _ => None,
     }
 }
+
+pub fn patches(name: &str) -> &'static [(&'static str, &'static str)] {
+    match name {
+        "arch" => &[
+            ("resolv-conf.sh", include_str!("../patches/resolv-conf.sh")),
+            (
+                "pacman-mirrorlist.sh",
+                include_str!("../patches/pacman-mirrorlist.sh"),
+            ),
+        ],
+        "ubuntu" => &[
+            ("resolv-conf.sh", include_str!("../patches/resolv-conf.sh")),
+            ("apt-sandbox.sh", include_str!("../patches/apt-sandbox.sh")),
+        ],
+        _ => &[("resolv-conf.sh", include_str!("../patches/resolv-conf.sh"))],
+    }
+}
