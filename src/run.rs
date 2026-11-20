@@ -49,6 +49,21 @@ pub struct ExtraBind {
     pub dir: bool,
 }
 
+fn tmpfs_dev(tgt: &str) -> Result<(), String> {
+    // /dev must NOT be NODEV: bind-mounted device nodes (null, zero,
+    // urandom, dri) need to function. Mode 755 (not the tmpfs default
+    // 1777): the kernel denies O_CREAT opens of device nodes owned by
+    // uids unmapped in this userns under sticky world-writable dirs,
+    // which breaks every `> /dev/null` redirect (host /dev is 755).
+    do_mount(
+        Some("tmpfs"),
+        tgt,
+        Some("tmpfs"),
+        libc::MS_NOSUID as _,
+        Some("mode=755"),
+    )
+}
+
 fn tmpfs(tgt: &str) -> Result<(), String> {
     do_mount(
         Some("tmpfs"),
@@ -144,7 +159,7 @@ fn grandchild(
             None,
         );
     }
-    step(tmpfs("/dev"));
+    step(tmpfs_dev("/dev"));
     let _ = std::fs::create_dir_all("/dev/pts");
     for d in ["null", "zero", "full", "random", "urandom", "tty"] {
         let host = format!("/oldroot/dev/{d}");

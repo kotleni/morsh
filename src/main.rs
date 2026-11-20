@@ -142,6 +142,27 @@ fn parse_cmdline(args: &[String], cmdline: &mut Cmdline) -> bool {
     false
 }
 
+fn push_file_bind(binds: &mut Vec<run::ExtraBind>, path: &str) {
+    // Note: exists(), not is_file() — sockets (dbus, wayland) are valid bind sources.
+    if std::path::Path::new(path).exists() {
+        binds.push(run::ExtraBind {
+            src: path.to_string(),
+            dst: path.to_string(),
+            dir: false,
+        });
+    }
+}
+
+fn push_dir_bind(binds: &mut Vec<run::ExtraBind>, path: &str) {
+    if std::path::Path::new(path).is_dir() {
+        binds.push(run::ExtraBind {
+            src: path.to_string(),
+            dst: path.to_string(),
+            dir: true,
+        });
+    }
+}
+
 fn collect_display(env: &mut Vec<(String, String)>) -> Result<Vec<run::ExtraBind>, String> {
     let mut binds = Vec::new();
     let mut found = false;
@@ -202,6 +223,42 @@ fn collect_display(env: &mut Vec<(String, String)>) -> Result<Vec<run::ExtraBind
     }
     if !found {
         return Err("no display found (set DISPLAY or WAYLAND_DISPLAY)".to_string());
+    }
+    // D-Bus session bus (KDE/Qt apps segfault or misbehave without it).
+    // Only forward unix:path sockets; TCP/host addresses are left as-is.
+    if let Ok(bus) = std::env::var("DBUS_SESSION_BUS_ADDRESS") {
+        if !bus.is_empty() {
+            env.push(("DBUS_SESSION_BUS_ADDRESS".to_string(), bus.clone()));
+            for part in bus.split(';') {
+                if let Some(p) = part.strip_prefix("unix:path=") {
+                    let sock = p.split(',').next().unwrap_or("");
+                    if !sock.is_empty() && std::path::Path::new(sock).exists() {
+                        binds.push(run::ExtraBind {
+                            src: sock.to_string(),
+                            dst: sock.to_string(),
+                            dir: false,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    // machine-id is required by dbus/glib (kitty explicitly errors without it).
+    push_file_bind(&mut binds, "/etc/machine-id");
+    // System bus for hosted apps that talk to logind/UPower/etc.
+    push_file_bind(&mut binds, "/run/dbus/system_bus_socket");
+    // Fonts: Alpine minirootfs ships fontconfig but no fonts, so
+    // xterm/kitty/konsole all fail (FcFontMatch, missing fixed font).
+    push_dir_bind(&mut binds, "/usr/share/fonts");
+    // GPU for Qt (konsole segfaults on llvmpipe-less fallback in some setups).
+    push_dir_bind(&mut binds, "/dev/dri");
+    // Let Qt pick the right platform (wayland vs xcb) like on the host.
+    for key in ["XDG_CURRENT_DESKTOP", "XDG_SESSION_TYPE", "DESKTOP_SESSION", "KDE_SESSION_VERSION"] {
+        if let Ok(v) = std::env::var(key) {
+            if !v.is_empty() {
+                env.push((key.to_string(), v));
+            }
+        }
     }
     Ok(binds)
 }
