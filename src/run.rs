@@ -348,22 +348,68 @@ pub fn enter(
     if n != 1 {
         return wait_pid(pid);
     }
-    let map = |helper: &str, id: u32| -> bool {
+    fn username_for(uid: u32) -> Option<String> {
+        unsafe {
+            let pw = libc::getpwuid(uid);
+            if pw.is_null() || (*pw).pw_name.is_null() {
+                return None;
+            }
+            std::ffi::CStr::from_ptr((*pw).pw_name)
+                .to_str()
+                .ok()
+                .map(|s| s.to_string())
+        }
+    }
+
+    fn sub_range(path: &str, uid: u32, gid: u32, username: Option<&str>) -> Option<(u32, u32)> {
+        let txt = std::fs::read_to_string(path).ok()?;
+        let want_uid = uid.to_string();
+        let want_gid = gid.to_string();
+        let mut fallback = None;
+        for line in txt.lines() {
+            let mut p = line.split(':');
+            let (name, start, count) = match (p.next(), p.next(), p.next()) {
+                (Some(n), Some(s), Some(c)) => (n.trim(), s.trim(), c.trim()),
+                _ => continue,
+            };
+            let (start, count): (u32, u32) = match (start.parse(), count.parse()) {
+                (Ok(s), Ok(c)) => (s, c),
+                _ => continue,
+            };
+            if let Some(u) = username {
+                if name == u {
+                    return Some((start, count));
+                }
+            }
+            if name == want_uid || name == want_gid {
+                return Some((start, count));
+            }
+            if fallback.is_none() {
+                fallback = Some((start, count));
+            }
+        }
+        // Single-user machine: only one entry, use it even if the key
+        // style (user name vs numeric id) didn't match.
+        fallback
+    }
+
+    let username = username_for(uid).or_else(|| std::env::var("USER").ok());
+    let uid_sub = sub_range("/etc/subuid", uid, gid, username.as_deref());
+    let gid_sub = sub_range("/etc/subgid", uid, gid, username.as_deref());
+    let map = |helper: &str, id: u32, sub: Option<(u32, u32)>| -> bool {
+        let mut args = vec![pid.to_string(), "0".to_string(), id.to_string(), "1".to_string()];
+        if let Some((start, count)) = sub {
+            args.push("1".to_string());
+            args.push(start.to_string());
+            args.push(count.to_string());
+        }
         std::process::Command::new(helper)
-            .args([
-                pid.to_string(),
-                "0".to_string(),
-                id.to_string(),
-                "1".to_string(),
-                "1".to_string(),
-                "100000".to_string(),
-                "65536".to_string(),
-            ])
+            .args(&args)
             .status()
             .map(|s| s.success())
             .unwrap_or(false)
     };
-    if map("newuidmap", uid) && map("newgidmap", gid) {
+    if map("newuidmap", uid, uid_sub) && map("newgidmap", gid, gid_sub) {
         unsafe {
             libc::write(go[1], c"1".as_ptr() as *const libc::c_void, 1);
             libc::close(go[1]);
