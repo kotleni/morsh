@@ -38,27 +38,55 @@ fn fetch_text(url: &str, dir: &Path) -> Result<String, String> {
 
 fn verify(tb: &Path, txt: &str) -> Result<(), String> {
     let base = tb.file_name().and_then(|s| s.to_str()).unwrap_or("");
-    let mut want = None;
-    for line in txt.lines() {
+    let is_hash = |h: &str| h.len() == 64 && h.chars().all(|c| c.is_ascii_hexdigit());
+    let mut want: Option<String> = None;
+    let mut fallback: Option<String> = None;
+    for raw in txt.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // BSD style: SHA256 (file) = hash (used by Void Linux)
+        if let (Some(op), Some(cp), Some(eq)) = (line.find('('), line.find(')'), line.find('=')) {
+            if op < cp && cp < eq {
+                let f = line[op + 1..cp].trim();
+                let h = line[eq + 1..]
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .trim();
+                let fname = Path::new(f).file_name().and_then(|s| s.to_str()).unwrap_or(f);
+                if (fname == base || f.trim_start_matches('*') == base) && is_hash(h) {
+                    want = Some(h.to_string());
+                    break;
+                }
+                continue;
+            }
+        }
+        // GNU style: hash [+*]file (Alpine, Arch, Ubuntu)
         let mut p = line.split_whitespace();
         match (p.next(), p.next()) {
-            (Some(h), Some(f)) if f.trim_start_matches('*') == base => {
-                want = Some(h);
-                break;
+            (Some(h), Some(_)) if is_hash(h) => {
+                let f = line[h.len()..].trim().trim_start_matches('*').trim();
+                let fname = Path::new(f).file_name().and_then(|s| s.to_str()).unwrap_or(f);
+                if fname == base || f == base {
+                    want = Some(h.to_string());
+                    break;
+                }
             }
             (Some(h), None) => {
-                if want.is_none() {
-                    want = Some(h);
+                if fallback.is_none() && is_hash(h.trim()) {
+                    fallback = Some(h.trim().to_string());
                 }
             }
             _ => {}
         }
     }
-    let want = want.ok_or("bad sha256 file".to_string())?;
+    let want = want.or(fallback).ok_or("bad sha256 file".to_string())?;
     let data = std::fs::read(tb).map_err(|e| e.to_string())?;
     let sum = sha2::Sha256::digest(&data);
     let got: String = sum.iter().map(|b| format!("{b:02x}")).collect();
-    if got.eq_ignore_ascii_case(want) {
+    if got.eq_ignore_ascii_case(&want) {
         Ok(())
     } else {
         Err("sha256 mismatch".to_string())
