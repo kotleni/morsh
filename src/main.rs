@@ -33,10 +33,19 @@ fn print_help(prog: &str) {
     eprintln!("       {prog} [OPTIONS] --distro NAME[:VERSION] [COMMAND [COMMAND_ARGS...]]");
     eprintln!("OPTIONS: ");
     eprintln!("        -h    --help                Show help");
-    eprintln!("              --distro=NAME[:VER]     Use cached distro rootfs (alpine, arch) instead of NEWROOT");
-    eprintln!("              --distro-release=VER    Distro version (alpine {}, arch {})", distro::ALPINE_VERSION, distro::ARCH_VERSION);
+    eprintln!("              --distro=NAME[:VER]     Use cached distro rootfs (alpine, arch, ubuntu, void, gentoo) instead of NEWROOT");
+    eprintln!(
+        "              --distro-release=VER    Distro version (alpine {}, arch {}, ubuntu {}, void {}, gentoo {} [latest resolves weekly timestamp])",
+        distro::ALPINE_VERSION,
+        distro::ARCH_VERSION,
+        distro::UBUNTU_VERSION,
+        distro::VOID_VERSION,
+        distro::GENTOO_VERSION,
+    );
     eprintln!("              --refresh               Re-download the distro rootfs");
-    eprintln!("              --display               Share host display (X11/Wayland) with the container");
+    eprintln!(
+        "              --display               Share host display (X11/Wayland) with the container"
+    );
     eprintln!("              --rootfs-cache=DIR      Rootfs cache directory");
     eprintln!();
     eprintln!("NEWROOT:      the root directory of the container");
@@ -104,7 +113,12 @@ fn parse_cmdline(args: &[String], cmdline: &mut Cmdline) -> bool {
                     Some((n, v)) => (n.to_string(), Some(v.to_string())),
                     None => (val.to_string(), None),
                 };
-                if n != "alpine" && n != "arch" {
+                if n != "alpine"
+                    && n != "arch"
+                    && n != "ubuntu"
+                    && n != "void"
+                    && n != "gentoo"
+                {
                     eprintln!("Unknown distro {n}");
                     return false;
                 }
@@ -140,6 +154,27 @@ fn parse_cmdline(args: &[String], cmdline: &mut Cmdline) -> bool {
         eprintln!("Missing COMMAND argument");
     }
     false
+}
+
+fn push_file_bind(binds: &mut Vec<run::ExtraBind>, path: &str) {
+    // Note: exists(), not is_file() — sockets (dbus, wayland) are valid bind sources.
+    if std::path::Path::new(path).exists() {
+        binds.push(run::ExtraBind {
+            src: path.to_string(),
+            dst: path.to_string(),
+            dir: false,
+        });
+    }
+}
+
+fn push_dir_bind(binds: &mut Vec<run::ExtraBind>, path: &str) {
+    if std::path::Path::new(path).is_dir() {
+        binds.push(run::ExtraBind {
+            src: path.to_string(),
+            dst: path.to_string(),
+            dir: true,
+        });
+    }
 }
 
 fn collect_display(env: &mut Vec<(String, String)>) -> Result<Vec<run::ExtraBind>, String> {
@@ -179,9 +214,8 @@ fn collect_display(env: &mut Vec<(String, String)>) -> Result<Vec<run::ExtraBind
     }
     if let Ok(w) = std::env::var("WAYLAND_DISPLAY") {
         if !w.is_empty() {
-            let rdir = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| {
-                format!("/run/user/{}", unsafe { libc::getuid() })
-            });
+            let rdir = std::env::var("XDG_RUNTIME_DIR")
+                .unwrap_or_else(|_| format!("/run/user/{}", unsafe { libc::getuid() }));
             let (host, disp) = if w.starts_with('/') {
                 (w.clone(), w.clone())
             } else {
@@ -203,12 +237,56 @@ fn collect_display(env: &mut Vec<(String, String)>) -> Result<Vec<run::ExtraBind
     if !found {
         return Err("no display found (set DISPLAY or WAYLAND_DISPLAY)".to_string());
     }
+    // D-Bus session bus (KDE/Qt apps segfault or misbehave without it).
+    // Only forward unix:path sockets; TCP/host addresses are left as-is.
+    if let Ok(bus) = std::env::var("DBUS_SESSION_BUS_ADDRESS") {
+        if !bus.is_empty() {
+            env.push(("DBUS_SESSION_BUS_ADDRESS".to_string(), bus.clone()));
+            for part in bus.split(';') {
+                if let Some(p) = part.strip_prefix("unix:path=") {
+                    let sock = p.split(',').next().unwrap_or("");
+                    if !sock.is_empty() && std::path::Path::new(sock).exists() {
+                        binds.push(run::ExtraBind {
+                            src: sock.to_string(),
+                            dst: sock.to_string(),
+                            dir: false,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    // machine-id is required by dbus/glib (kitty explicitly errors without it).
+    push_file_bind(&mut binds, "/etc/machine-id");
+    // System bus for hosted apps that talk to logind/UPower/etc.
+    push_file_bind(&mut binds, "/run/dbus/system_bus_socket");
+    // Fonts: Alpine minirootfs ships fontconfig but no fonts, so
+    // xterm/kitty/konsole all fail (FcFontMatch, missing fixed font).
+    push_dir_bind(&mut binds, "/usr/share/fonts");
+    // GPU for Qt (konsole segfaults on llvmpipe-less fallback in some setups).
+    push_dir_bind(&mut binds, "/dev/dri");
+    // Let Qt pick the right platform (wayland vs xcb) like on the host.
+    for key in [
+        "XDG_CURRENT_DESKTOP",
+        "XDG_SESSION_TYPE",
+        "DESKTOP_SESSION",
+        "KDE_SESSION_VERSION",
+    ] {
+        if let Ok(v) = std::env::var(key) {
+            if !v.is_empty() {
+                env.push((key.to_string(), v));
+            }
+        }
+    }
     Ok(binds)
 }
 
 fn run() -> i32 {
     let args: Vec<String> = std::env::args().collect();
-    let prog = args.first().cloned().unwrap_or_else(|| "dshell".to_string());
+    let prog = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "dshell".to_string());
     let mut cmdline = Cmdline::default();
 
     if !parse_cmdline(&args, &mut cmdline) {
@@ -224,16 +302,34 @@ fn run() -> i32 {
     let is_distro = cmdline.distro.is_some();
     if is_distro {
         let name = cmdline.distro.clone().unwrap();
-        let version = cmdline
+        let mut version = cmdline
             .distro_version
             .clone()
             .unwrap_or_else(|| distro::default_version(&name).unwrap().to_string());
-        let spec = match distro::spec(&name, &version) {
-            Some(s) => s,
-            None => {
-                eprintln!("Bad distro version {version}");
-                return -1;
+        // Gentoo stage3 filenames embed a weekly timestamp, so "latest"
+        // is resolved to a concrete timestamp first (also used for the cache dir).
+        let mut latest: Option<distro::Spec> = None;
+        if name == "gentoo" && version == "latest" {
+            match rootfs::resolve_gentoo_latest() {
+                Ok((ts, spec)) => {
+                    version = ts;
+                    latest = Some(spec);
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    return -1;
+                }
             }
+        }
+        let spec = match latest {
+            Some(s) => s,
+            None => match distro::spec(&name, &version) {
+                Some(s) => s,
+                None => {
+                    eprintln!("Bad distro version {version}");
+                    return -1;
+                }
+            },
         };
         let root = match rootfs::ensure(
             &name,
@@ -282,7 +378,13 @@ fn run() -> i32 {
     } else {
         Vec::new()
     };
-    run::enter(std::path::Path::new(&root), &cmdline.guest_argv, &env, workdir, &extra)
+    run::enter(
+        std::path::Path::new(&root),
+        &cmdline.guest_argv,
+        &env,
+        workdir,
+        &extra,
+    )
 }
 
 fn main() {

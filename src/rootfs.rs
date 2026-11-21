@@ -36,29 +36,94 @@ fn fetch_text(url: &str, dir: &Path) -> Result<String, String> {
     std::fs::read_to_string(&tmp).map_err(|e| e.to_string())
 }
 
+/// Resolve Gentoo "latest" to a concrete (timestamp, Spec).
+/// The autobuilds `current-stage3-*` dirs keep only the newest build and the
+/// timestamp is baked into the filename, so a pinned version rots weekly.
+/// `latest-stage3-*.txt` (PGP-signed) carries the current tarball name:
+/// `stage3-amd64-openrc-20261115T234600Z.tar.xz 277024856`.
+pub fn resolve_gentoo_latest() -> Result<(String, crate::distro::Spec), String> {
+    let (rel, variant) =
+        crate::distro::gentoo_variant().ok_or("unsupported host arch".to_string())?;
+    let base = format!(
+        "https://distfiles.gentoo.org/releases/{rel}/autobuilds/current-stage3-{variant}"
+    );
+    let dir = std::env::temp_dir().join("dshell-gentoo-latest");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let txt = fetch_text(&format!("{base}/latest-stage3-{variant}.txt"), &dir)?;
+    let prefix = format!("stage3-{variant}-");
+    for line in txt.lines() {
+        let line = line.trim();
+        if line.is_empty()
+            || line.starts_with('#')
+            || line.starts_with("-----")
+            || line.starts_with("Hash:")
+        {
+            continue;
+        }
+        let file = line.split_whitespace().next().unwrap_or("");
+        if file.starts_with(&prefix) && file.ends_with(".tar.xz") {
+            let version = file[prefix.len()..file.len() - ".tar.xz".len()].to_string();
+            if version.is_empty() || version.contains('/') {
+                continue;
+            }
+            let spec = crate::distro::gentoo(&version).ok_or("bad gentoo version".to_string())?;
+            return Ok((version, spec));
+        }
+    }
+    Err("bad gentoo latest file".to_string())
+}
+
 fn verify(tb: &Path, txt: &str) -> Result<(), String> {
     let base = tb.file_name().and_then(|s| s.to_str()).unwrap_or("");
-    let mut want = None;
-    for line in txt.lines() {
+    let is_hash = |h: &str| h.len() == 64 && h.chars().all(|c| c.is_ascii_hexdigit());
+    let mut want: Option<String> = None;
+    let mut fallback: Option<String> = None;
+    for raw in txt.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // BSD style: SHA256 (file) = hash (used by Void Linux)
+        if let (Some(op), Some(cp), Some(eq)) = (line.find('('), line.find(')'), line.find('=')) {
+            if op < cp && cp < eq {
+                let f = line[op + 1..cp].trim();
+                let h = line[eq + 1..]
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .trim();
+                let fname = Path::new(f).file_name().and_then(|s| s.to_str()).unwrap_or(f);
+                if (fname == base || f.trim_start_matches('*') == base) && is_hash(h) {
+                    want = Some(h.to_string());
+                    break;
+                }
+                continue;
+            }
+        }
+        // GNU style: hash [+*]file (Alpine, Arch, Ubuntu)
         let mut p = line.split_whitespace();
         match (p.next(), p.next()) {
-            (Some(h), Some(f)) if f.trim_start_matches('*') == base => {
-                want = Some(h);
-                break;
+            (Some(h), Some(_)) if is_hash(h) => {
+                let f = line[h.len()..].trim().trim_start_matches('*').trim();
+                let fname = Path::new(f).file_name().and_then(|s| s.to_str()).unwrap_or(f);
+                if fname == base || f == base {
+                    want = Some(h.to_string());
+                    break;
+                }
             }
             (Some(h), None) => {
-                if want.is_none() {
-                    want = Some(h);
+                if fallback.is_none() && is_hash(h.trim()) {
+                    fallback = Some(h.trim().to_string());
                 }
             }
             _ => {}
         }
     }
-    let want = want.ok_or("bad sha256 file".to_string())?;
+    let want = want.or(fallback).ok_or("bad sha256 file".to_string())?;
     let data = std::fs::read(tb).map_err(|e| e.to_string())?;
     let sum = sha2::Sha256::digest(&data);
     let got: String = sum.iter().map(|b| format!("{b:02x}")).collect();
-    if got.eq_ignore_ascii_case(want) {
+    if got.eq_ignore_ascii_case(&want) {
         Ok(())
     } else {
         Err("sha256 mismatch".to_string())
@@ -68,7 +133,9 @@ fn verify(tb: &Path, txt: &str) -> Result<(), String> {
 fn reader(tb: &Path) -> Result<Box<dyn std::io::Read>, String> {
     let f = std::fs::File::open(tb).map_err(|e| e.to_string())?;
     let name = tb.file_name().and_then(|s| s.to_str()).unwrap_or("");
-    if name.ends_with(".zst") {
+    if name.ends_with(".xz") {
+        Ok(Box::new(xz2::read::XzDecoder::new(f)))
+    } else if name.ends_with(".zst") {
         Ok(Box::new(
             ruzstd::decoding::StreamingDecoder::new(f).map_err(|e| e.to_string())?,
         ))
@@ -86,6 +153,7 @@ fn unpack(tb: &Path, dest: &Path) -> Result<(), String> {
         if rel == Path::new(".") {
             continue;
         }
+
         if e.header().entry_type().is_dir() {
             std::fs::create_dir_all(dest.join(&rel)).map_err(|e| e.to_string())?;
         } else {
@@ -150,6 +218,23 @@ fn extract(tb: &Path, dest: &Path) -> Result<(), String> {
     apply_modes(tb, dest)
 }
 
+fn run_patches(distro: &str, root: &Path) -> Result<(), String> {
+    for (name, body) in crate::distro::patches(distro) {
+        eprintln!("patch {name}");
+        let st = Command::new("sh")
+            .arg("-c")
+            .arg(body)
+            .arg(name)
+            .arg(root)
+            .status()
+            .map_err(|e| format!("patch {name}: {e}"))?;
+        if !st.success() {
+            return Err(format!("patch {name} failed: {st}"));
+        }
+    }
+    Ok(())
+}
+
 pub fn ensure(
     distro: &str,
     version: &str,
@@ -197,32 +282,7 @@ pub fn ensure(
         None => tmp,
     };
     std::fs::rename(&src, &root).map_err(|e| e.to_string())?;
-    let rc = root.join("etc").join("resolv.conf");
-    if !rc.exists() {
-        std::fs::write(&rc, "nameserver 8.8.8.8\nnameserver 1.1.1.1\n")
-            .map_err(|e| e.to_string())?;
-    }
-    if distro == "arch" {
-        let ml = root.join("etc").join("pacman.d").join("mirrorlist");
-        std::fs::write(&ml, "Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch\n")
-            .map_err(|e| e.to_string())?;
-        let pc = root.join("etc").join("pacman.conf");
-        let txt = std::fs::read_to_string(&pc).map_err(|e| e.to_string())?;
-        let mut patched = String::new();
-        for line in txt.lines() {
-            let t = line.trim_start();
-            if t.starts_with("SigLevel") && !t.starts_with("LocalFileSigLevel") {
-                patched.push_str("SigLevel = Never\n");
-            } else {
-                patched.push_str(line);
-                patched.push('\n');
-            }
-        }
-        let patched = patched
-            .replace("#DisableSandboxFilesystem", "DisableSandboxFilesystem")
-            .replace("#DisableSandboxSyscalls", "DisableSandboxSyscalls");
-        std::fs::write(&pc, patched).map_err(|e| e.to_string())?;
-    }
+    run_patches(distro, &root)?;
     std::fs::write(&ok, "1").map_err(|e| e.to_string())?;
     Ok(root)
 }
