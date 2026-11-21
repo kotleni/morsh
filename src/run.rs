@@ -184,6 +184,7 @@ fn grandchild(
     step(tmpfs("/run"));
     let _ = std::fs::create_dir_all("/run/shm");
     let _ = std::os::unix::fs::symlink("../run/shm", "/dev/shm");
+    let _ = std::os::unix::fs::symlink("/proc/self/fd", "/dev/fd");
     let _ = std::os::unix::fs::symlink("/proc/self/fd/0", "/dev/stdin");
     let _ = std::os::unix::fs::symlink("/proc/self/fd/1", "/dev/stdout");
     let _ = std::os::unix::fs::symlink("/proc/self/fd/2", "/dev/stderr");

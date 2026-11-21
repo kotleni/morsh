@@ -33,11 +33,14 @@ fn print_help(prog: &str) {
     eprintln!("       {prog} [OPTIONS] --distro NAME[:VERSION] [COMMAND [COMMAND_ARGS...]]");
     eprintln!("OPTIONS: ");
     eprintln!("        -h    --help                Show help");
-    eprintln!("              --distro=NAME[:VER]     Use cached distro rootfs (alpine, arch) instead of NEWROOT");
+    eprintln!("              --distro=NAME[:VER]     Use cached distro rootfs (alpine, arch, ubuntu, void, gentoo) instead of NEWROOT");
     eprintln!(
-        "              --distro-release=VER    Distro version (alpine {}, arch {})",
+        "              --distro-release=VER    Distro version (alpine {}, arch {}, ubuntu {}, void {}, gentoo {} [latest resolves weekly timestamp])",
         distro::ALPINE_VERSION,
-        distro::ARCH_VERSION
+        distro::ARCH_VERSION,
+        distro::UBUNTU_VERSION,
+        distro::VOID_VERSION,
+        distro::GENTOO_VERSION,
     );
     eprintln!("              --refresh               Re-download the distro rootfs");
     eprintln!(
@@ -110,7 +113,12 @@ fn parse_cmdline(args: &[String], cmdline: &mut Cmdline) -> bool {
                     Some((n, v)) => (n.to_string(), Some(v.to_string())),
                     None => (val.to_string(), None),
                 };
-                if n != "alpine" && n != "arch" && n != "ubuntu" && n != "void" {
+                if n != "alpine"
+                    && n != "arch"
+                    && n != "ubuntu"
+                    && n != "void"
+                    && n != "gentoo"
+                {
                     eprintln!("Unknown distro {n}");
                     return false;
                 }
@@ -294,16 +302,34 @@ fn run() -> i32 {
     let is_distro = cmdline.distro.is_some();
     if is_distro {
         let name = cmdline.distro.clone().unwrap();
-        let version = cmdline
+        let mut version = cmdline
             .distro_version
             .clone()
             .unwrap_or_else(|| distro::default_version(&name).unwrap().to_string());
-        let spec = match distro::spec(&name, &version) {
-            Some(s) => s,
-            None => {
-                eprintln!("Bad distro version {version}");
-                return -1;
+        // Gentoo stage3 filenames embed a weekly timestamp, so "latest"
+        // is resolved to a concrete timestamp first (also used for the cache dir).
+        let mut latest: Option<distro::Spec> = None;
+        if name == "gentoo" && version == "latest" {
+            match rootfs::resolve_gentoo_latest() {
+                Ok((ts, spec)) => {
+                    version = ts;
+                    latest = Some(spec);
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    return -1;
+                }
             }
+        }
+        let spec = match latest {
+            Some(s) => s,
+            None => match distro::spec(&name, &version) {
+                Some(s) => s,
+                None => {
+                    eprintln!("Bad distro version {version}");
+                    return -1;
+                }
+            },
         };
         let root = match rootfs::ensure(
             &name,

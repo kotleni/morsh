@@ -36,6 +36,43 @@ fn fetch_text(url: &str, dir: &Path) -> Result<String, String> {
     std::fs::read_to_string(&tmp).map_err(|e| e.to_string())
 }
 
+/// Resolve Gentoo "latest" to a concrete (timestamp, Spec).
+/// The autobuilds `current-stage3-*` dirs keep only the newest build and the
+/// timestamp is baked into the filename, so a pinned version rots weekly.
+/// `latest-stage3-*.txt` (PGP-signed) carries the current tarball name:
+/// `stage3-amd64-openrc-20261115T234600Z.tar.xz 277024856`.
+pub fn resolve_gentoo_latest() -> Result<(String, crate::distro::Spec), String> {
+    let (rel, variant) =
+        crate::distro::gentoo_variant().ok_or("unsupported host arch".to_string())?;
+    let base = format!(
+        "https://distfiles.gentoo.org/releases/{rel}/autobuilds/current-stage3-{variant}"
+    );
+    let dir = std::env::temp_dir().join("dshell-gentoo-latest");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let txt = fetch_text(&format!("{base}/latest-stage3-{variant}.txt"), &dir)?;
+    let prefix = format!("stage3-{variant}-");
+    for line in txt.lines() {
+        let line = line.trim();
+        if line.is_empty()
+            || line.starts_with('#')
+            || line.starts_with("-----")
+            || line.starts_with("Hash:")
+        {
+            continue;
+        }
+        let file = line.split_whitespace().next().unwrap_or("");
+        if file.starts_with(&prefix) && file.ends_with(".tar.xz") {
+            let version = file[prefix.len()..file.len() - ".tar.xz".len()].to_string();
+            if version.is_empty() || version.contains('/') {
+                continue;
+            }
+            let spec = crate::distro::gentoo(&version).ok_or("bad gentoo version".to_string())?;
+            return Ok((version, spec));
+        }
+    }
+    Err("bad gentoo latest file".to_string())
+}
+
 fn verify(tb: &Path, txt: &str) -> Result<(), String> {
     let base = tb.file_name().and_then(|s| s.to_str()).unwrap_or("");
     let is_hash = |h: &str| h.len() == 64 && h.chars().all(|c| c.is_ascii_hexdigit());
